@@ -1,10 +1,6 @@
-name: Docker
-
+name: "Tag build and publish"
 on:
-  push:
-    # Publish `v1.2.3` tags as releases.
-    tags:
-      - "*"
+  create
 
 env:
   IMAGE_NAME: flowest
@@ -16,10 +12,25 @@ jobs:
     # Ensure test job passes before pushing image.
 
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    if: github.event.ref_type == 'tag'
 
     steps:
       - uses: actions/checkout@v2
+
+      - name: Get version number from tag
+        run: |
+          echo "::set-env name=VERSION::${{ github.event.ref }}"
+
+      - name: Recreate version file
+        run: |
+          # Create version file
+          echo "__version__ = "'"'$VERSION'"' > flower/version.py
+          git checkout -b temp
+          git add flower/version.py
+          git -c user.email="auto@flowest.flowest" -c user.name="flowest-bot" commit -m "Bumb version number to "$VERSION flower/version.py
+          echo "dd"$VERSION
+          git tag -f $VERSION
+          git push -f --tag
 
       - name: Build image
         run: docker build . --file Dockerfile --tag image
@@ -31,30 +42,50 @@ jobs:
         run: |
           IMAGE_ID=docker.pkg.github.com/${{ github.repository }}/$IMAGE_NAME
           IMAGE_ID=${IMAGE_ID,,}
-          # Strip git ref prefix from version
-          VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
-          # Strip "v" prefix from tag name
-          [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
+          # Get tag name
+          VERSION=${GITHUB_REF/refs\/tags\//}
           # Use Docker `latest` tag convention
-          [ "$VERSION" == "master" ] && VERSION=latest
-          echo IMAGE_ID=$IMAGE_ID
-          echo VERSION=$VERSION
-          docker tag image $IMAGE_ID:$VERSION
-          docker push $IMAGE_ID:$VERSION
-
+          git fetch --all --tags
+          if [ $(git tag | sort -V | tail -n1) == $VERSION ]
+          then
+          docker tag image $IMAGE_ID:latest
+          docker push $IMAGE_ID:latest
+          fi
+          # Do not push other tag then latest since there is 500 MB limit on repos
+          #docker tag image $IMAGE_ID:$VERSION
+          #docker push $IMAGE_ID:$VERSION
       - name: Log into dockerhub registry
         run: echo "${{ secrets.dockerhubpasword }}" | docker login -u ${{ secrets.dockerhubuser }}  --password-stdin
 
       - name: Push image on dockerhub
         run: |
           IMAGE_ID=flowest/flowest
-          # Strip git ref prefix from version
-          VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
-          # Strip "v" prefix from tag name
-          [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
+          # Get tag name
+          VERSION=${GITHUB_REF/refs\/tags\//}
           # Use Docker `latest` tag convention
-          [ "$VERSION" == "master" ] && VERSION=latest
-          echo IMAGE_ID=$IMAGE_ID
-          echo VERSION=$VERSION
+          if [ $(git tag | sort -V | tail -n1) == $VERSION ]
+          then
+          docker tag image $IMAGE_ID:latest
+          docker push $IMAGE_ID:latest
+          fi
           docker tag image $IMAGE_ID:$VERSION
           docker push $IMAGE_ID:$VERSION
+
+      - name: Install python
+        uses: actions/setup-python@v1
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install setuptools wheel twine
+
+      - name: Build package and push on pypi
+        env:
+          TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
+          TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+        run: |
+          # Get started
+          python setup.py sdist bdist_wheel
+          twine upload dist/*
